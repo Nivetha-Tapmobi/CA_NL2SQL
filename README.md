@@ -2,542 +2,461 @@
 
 ## Overview
 
-Petpooja NL-to-SQL Query Generator converts natural language business questions into validated SQL queries against the `pet_pooja_sales` table.
+Petpooja NL-to-SQL is a production-oriented Natural Language to SQL application that converts restaurant sales questions into validated SQL queries against the `pet_pooja_sales` dataset.
 
-The application is designed for restaurant sales analytics and includes multiple production guardrails to improve reliability, security, observability, and query accuracy.
+The system follows a guarded multi-stage pipeline:
 
-### Supported Questions
+User Question → Intent Analysis → Query Rewrite → Schema Retrieval → Business Glossary → Few-Shot Examples → SQL Generation → SQL Validation → Execution
 
-* Total sales
-* Revenue trends
-* Store performance
-* Top-selling items
-* Order counts
-* Cancellation analysis
-* Payment type analysis
-* Area-wise performance
-* Average order value
-* Date-range comparisons
+The current implementation focuses primarily on the query-generation pipeline and validator stage.
 
 ---
 
-## Architecture
+# Architecture Flow
 
 ```mermaid
 flowchart LR
 
     A[User Question]
 
-    A --> B[Guardrail Classifier]
-    B --> C[Intent Rewrite & Spell Correction]
+    A --> B[Pre-LLM Guardrails]
+    B --> C[Greeting / Canned Response Check]
+    C --> D[Intake Agent]
 
-    C --> D[Schema Retrieval]
-    D --> E[Business Glossary]
-    E --> F[Few-Shot Examples]
-    F --> G[Fuzzy Item Matching]
+    D --> D1[Intent Detection]
+    D --> D2[Spelling Correction]
+    D --> D3[Answerability Check]
+    D --> D4[Jailbreak Detection]
 
-    G --> H[SQL Generation LLM]
+    D --> E[Schema Retrieval]
 
-    H --> I[SQL Validator]
+    E --> F[Business Glossary]
 
-    I -->|Valid| J[Query Execution]
-    I -->|Invalid| K[Fixer Loop]
+    F --> G[Few-Shot Examples]
 
-    K --> H
+    G --> H[Categorical Context Retrieval]
 
-    K -->|Still Invalid| L[Fallback Model]
-    L --> I
+    H --> I[Item Name Fuzzy Matching]
 
-    I --> M[Results]
+    I --> J[SQL Generation Agent]
+
+    J --> K[SQL Validator]
+
+    K -->|Valid| L[Query Cache Check]
+
+    K -->|Invalid| M[Fix Attempt]
+
+    M --> K
+
+    L -->|Cache Hit| N[Return Cached Result]
+
+    L -->|Cache Miss| O[Execute SQL]
+
+    O --> P[Result Formatting]
+
+    P --> Q[UI Response]
 ```
 
 ---
 
-## End-to-End Flow
+# End-to-End Request Lifecycle
 
 ```mermaid
 sequenceDiagram
 
     participant User
-    participant Guardrail
-    participant Rewriter
+    participant Intake
+    participant Retrieval
     participant SQLAgent
     participant Validator
-    participant Database
+    participant Cache
+    participant DB
+    participant UI
 
-    User->>Guardrail: Natural Language Question
+    User->>Intake: Ask sales question
 
-    Guardrail->>Rewriter: Safe Question
+    Intake->>Intake: Security Check
+    Intake->>Intake: Rewrite Question
+    Intake->>Intake: Answerability Check
 
-    Rewriter->>SQLAgent: Rewritten Question + Context
+    Intake->>Retrieval: Fetch Schema
+    Retrieval->>Retrieval: Load Business Glossary
+    Retrieval->>Retrieval: Load Few-Shots
+    Retrieval->>Retrieval: Load Categories
+    Retrieval->>Retrieval: Fuzzy Match Items
+
+    Retrieval->>SQLAgent: Build Context
 
     SQLAgent->>Validator: Generated SQL
 
-    Validator-->>SQLAgent: Validation Errors (if any)
+    Validator->>Validator: Syntax Validation
+    Validator->>Validator: Safety Validation
 
-    SQLAgent->>Validator: Corrected SQL
+    Validator->>Cache: Check Existing Result
 
-    Validator->>Database: Execute Valid Query
+    alt Cache Hit
+        Cache-->>UI: Cached Response
+    else Cache Miss
+        Validator->>DB: Execute Query
+        DB-->>UI: Query Result
+    end
 
-    Database-->>Validator: Results
-
-    Validator-->>User: Data + Explanation
+    UI-->>User: Final Answer
 ```
 
 ---
 
-## Core Components
+# Core Components
 
-### 1. Guardrail Layer
+## 1. Intake Layer
 
-Detects:
+Responsible for:
 
-* Prompt injection attempts
-* Jailbreak attempts
-* System prompt extraction attempts
-* Non-business questions
-* Unsafe SQL requests
+* Prompt injection detection
+* Jailbreak detection
+* Question rewriting
+* Spelling correction
+* Answerability verification
+
+Output:
+
+```text
+{
+  rewritten_question,
+  is_answerable,
+  clarification_needed,
+  is_suspicious
+}
+```
+
+---
+
+## 2. Schema Retrieval
+
+Loads schema information about:
+
+* Table structure
+* Column metadata
+* Business rules
+* Aggregation rules
+* Date handling rules
+
+This ensures the model generates SQL using only valid fields.
+
+---
+
+## 3. Business Glossary
+
+Maps business language to database language.
 
 Examples:
 
-* Ignore previous instructions
-* Show system prompt
-* Act as DBA
-* Generate DELETE query
+| Business Term | Database Meaning |
+| ------------- | ---------------- |
+| Store         | restaurant_name  |
+| Outlet        | restaurant_name  |
+| Branch        | restaurant_name  |
+| Location      | restaurant_name  |
+
+This helps users ask questions naturally.
 
 ---
 
-### 2. Query Rewriter
+## 4. Few-Shot Retrieval
 
-Responsibilities:
+Injects curated examples such as:
 
-* Correct spelling mistakes
-* Normalize user intent
-* Detect ambiguity
-* Reject unsupported requests
-* Maintain conversation context
+* Total sales
+* Top selling items
+* Cancelled orders
+* Parcel orders
+* Average order value
 
-Example:
-
-**Input**
-
-```text
-totl sales roypettah lst week
-```
-
-**Rewritten**
-
-```text
-total sales Royapettah last week
-```
+This improves SQL consistency and reduces hallucinations.
 
 ---
 
-### 3. Business Glossary
+## 5. Categorical Context Retrieval
 
-Maps business language to actual schema columns.
-
-| Business Term | Database Column |
-| ------------- | --------------- |
-| Store         | restaurant_name |
-| Outlet        | restaurant_name |
-| Branch        | restaurant_name |
-| Location      | restaurant_name |
-| Region        | area            |
-| Zone          | area            |
-
-Example:
-
-```text
-Sales in Royapettah
-```
-
-becomes
-
-```sql
-LOWER(restaurant_name)
-LIKE LOWER('%Royapettah%')
-```
-
----
-
-### 4. Schema Awareness
-
-The application understands:
-
-### Invoice-Level Columns
+Pulls real values from the database.
 
 Examples:
 
-* total
-* discount
-* total_tax
-* delivery_charge
+```text
+status:
+    Success
+    Cancelled
 
-These repeat across every item row.
+payment_type:
+    Cash
+    GPay
+    Card
+```
 
-### Item-Level Columns
-
-Examples:
-
-* item_name
-* item_quantity
-* item_total
-* category_name
-
-These are safe for direct aggregation.
+The model is forced to use actual values instead of inventing them.
 
 ---
 
-### 5. Fuzzy Item Matching
+## 6. Item Name Fuzzy Matching
 
-Uses real menu items from the database.
+Handles:
 
-Supports:
-
-* Typo correction
-* Synonym expansion
-* Similar item detection
+* Typographical errors
+* Alternate spellings
+* Regional synonyms
 
 Example:
-
-```text
-dosaa sales
-```
-
-may resolve to
-
-```text
-Dosa
-```
-
-Example synonym group:
 
 ```text
 curd
 dahi
 yogurt
-yoghurt
 ```
+
+All map to the same menu item group.
 
 ---
 
-### 6. SQL Generation
+## 7. SQL Generation Agent
 
 Uses:
 
-* Gemini
-* Groq
-* PydanticAI Agents
+* Schema
+* Business glossary
+* Few-shot examples
+* Categorical values
+* Item matches
 
-Available models:
+to generate SQL.
 
-| Model              |
-| ------------------ |
-| Gemini 2.5 Flash   |
-| Gemini 2.0 Flash   |
-| Groq Llama 3.3 70B |
-
----
-
-### 7. SQL Validation
-
-Before execution every query is validated.
-
-Checks include:
-
-#### Allowed Operations
-
-Only:
-
-```sql
-SELECT
-```
-
-Allowed.
-
-#### Blocked Operations
-
-```sql
-INSERT
-UPDATE
-DELETE
-DROP
-ALTER
-TRUNCATE
-MERGE
-```
-
-#### Schema Validation
-
-Ensures:
-
-* Columns exist
-* Table exists
-* Only approved schema is referenced
-
-#### Invoice Dedup Validation
-
-Prevents:
-
-```sql
-SELECT SUM(total)
-FROM pet_pooja_sales
-```
-
-which would overcount invoices.
-
-Forces:
-
-```sql
-SELECT SUM(total)
-FROM (
-    SELECT DISTINCT invoice_no, total
-    FROM pet_pooja_sales
-) invoices
-```
-
----
-
-## Business Rules
-
-### Business Day Logic
-
-Restaurant business day starts at:
+Supported model cascade:
 
 ```text
-04:00 AM
+Primary Model
+    ↓
+Gemini 2.5 Flash
+    ↓
+Gemini 2.0 Flash
+    ↓
+GPT-OSS 120B
+    ↓
+Qwen 3.6 27B
 ```
 
-A sale at:
-
-```text
-01:15 AM Aug 15
-```
-
-belongs to:
-
-```text
-Aug 14 Business Day
-```
-
-Implementation:
-
-```sql
-DATE(date - INTERVAL 4 HOUR)
-```
+Automatic fallback occurs if a model fails.
 
 ---
 
-### Default Status Filtering
+## 8. SQL Validator
 
-Sales-related questions automatically apply:
+Validates:
 
-```sql
-status = 'Success'
-```
+### Syntax
 
-unless user explicitly asks for:
+* SQL parsing
+* Valid SELECT statement
 
-* Cancelled orders
-* All orders
-* Specific statuses
+### Security
+
+Blocks:
+
+* UPDATE
+* DELETE
+* INSERT
+* DROP
+* ALTER
+* TRUNCATE
+
+### Schema Validation
+
+Checks:
+
+* Valid tables
+* Valid columns
+* Allowed aggregations
 
 ---
 
-## Query Cache
+## 9. Query Cache
 
 SQLite-backed cache.
 
 Cache key includes:
 
 * User question
-* Selected model
-* Prompt version
+* Model used
 * Categorical context snapshot
+* Prompt version
 
 Benefits:
 
-* Faster responses
+* Lower latency
 * Reduced LLM cost
-* Reduced database load
+* Consistent responses
 
 ---
 
-## Model Cascade Strategy
+## 10. SQL Execution
 
-```mermaid
-flowchart TD
-
-    A[Generate SQL]
-
-    A --> B[Validation]
-
-    B -->|Pass| C[Execute]
-
-    B -->|Fail| D[Retry Same Model]
-
-    D --> E[Validation]
-
-    E -->|Pass| C
-
-    E -->|Fail| F[Fallback Model]
-
-    F --> G[Validation]
-
-    G -->|Pass| C
-
-    G -->|Fail| H[Return Error]
-```
-
-Maximum SQL-generation attempts:
+After validation:
 
 ```text
-3
+Generated SQL
+    ↓
+Read-only Database User
+    ↓
+Execution
+    ↓
+Results
+```
+
+Production recommendation:
+
+```text
+Never execute with a write-enabled DB account.
+Use a dedicated SELECT-only user.
 ```
 
 ---
 
-## Observability
+# Observability
 
-### Logfire
+## Logfire
 
 Tracks:
 
+* Request lifecycle
 * Cache hits/misses
-* Validation results
-* Model usage
-* Query duration
-* Execution statistics
+* Validation failures
+* Execution time
+* Row counts
+* Model selection
+* Retry attempts
 
-### Langfuse
+## Langfuse
 
 Tracks:
 
 * Prompts
 * Responses
 * Token usage
-* Cost estimation
-* Trace analysis
+* Cost
+* Latency
+* Traces
 
----
+## The application exports OpenTelemetry traces to both Logfire and Langfuse.
 
-## Environment Variables
-
-Create a `.env` file.
-
-```env
-GEMINI_API_KEY=
-
-GROQ_API_KEY=
-
-LOGFIRE_TOKEN=
-
-LANGFUSE_PUBLIC_KEY=
-LANGFUSE_SECRET_KEY=
-
-LANGFUSE_HOST=https://cloud.langfuse.com
-
-EXEC_DB_URL=mysql+pymysql://readonly_user:password@localhost:3306/CA_reconciliation
-
-REWRITER_MODEL=groq:llama-3.1-8b-instant
-
-FALLBACK_SQL_MODEL=google:gemini-2.5-flash
-
-BUSINESS_DAY_CUTOFF_HOUR=4
-```
-
----
-
-## Installation
-
-```bash
-pip install \
-streamlit \
-pydantic-ai-slim[google,groq] \
-pandas \
-sqlalchemy \
-pymysql \
-sqlglot \
-logfire \
-python-dotenv
-```
-
----
-
-## Running the Application
-
-```bash
-streamlit run app.py
-```
-
----
-
-## Production Safety Features
-
-* Prompt Injection Detection
-* Jailbreak Detection
-* Read-Only SQL Enforcement
-* Schema Validation
-* Invoice Dedup Validation
-* Query Cost Checks
-* Query Scan Thresholds
-* Model Escalation Strategy
-* Exact Match Caching
-* Conversation Memory
-* Structured Output Validation
-
----
-
-## High-Level System Diagram
+# Production Guardrails
 
 ```mermaid
-flowchart TB
+flowchart TD
 
-    User
+    A[User Question]
 
-    User --> Guardrail
-    Guardrail --> Rewriter
-    Rewriter --> Context
+    A --> B[Regex Injection Detection]
 
-    subgraph Context
-        Schema
-        Glossary
-        FewShot
-        Categories
-        ItemMatching
-    end
+    B --> C[Intake LLM Security Check]
 
-    Context --> SQLAgent
-    SQLAgent --> Validator
-    Validator --> Database
+    C --> D[Schema-Constrained SQL Generation]
 
-    Database --> Results
+    D --> E[SQL Validator]
 
-    Results --> User
+    E --> F[Read-Only DB User]
 
-    SQLAgent --> Logfire
-    SQLAgent --> Langfuse
+    F --> G[Execution]
+
+    E --> X[Reject Unsafe SQL]
+```
+
+Layers:
+
+1. Regex Guardrail
+2. LLM Security Classification
+3. Schema-Constrained Generation
+4. SQL Validator
+5. Read-Only Database User
+
+---
+
+# Current Pipeline Coverage
+
+Implemented:
+
+* Intent Detection
+* Rewrite
+* Security Checks
+* Schema Retrieval
+* Business Glossary
+* Few-Shot Retrieval
+* SQL Generation
+* SQL Validation
+* Cache
+* Execution
+* Observability
+
+Future Hardening:
+
+* Result Explanation Agent
+* Dashboard Generation
+* Chart Recommendation Engine
+* Semantic Metric Layer
+* RAG-based Business Knowledge Base
+
+---
+
+# Technology Stack
+
+```text
+Frontend:
+    Streamlit
+
+LLM Framework:
+    PydanticAI
+
+Models:
+    Gemini
+    GPT-OSS
+    Qwen
+
+Database:
+    MySQL
+
+Validation:
+    SQLGlot
+
+Caching:
+    SQLite
+
+Observability:
+    Logfire
+    Langfuse
+
+ORM:
+    SQLAlchemy
 ```
 
 ---
 
-## Key Benefits
+# High-Level Summary
 
-✅ Secure NL-to-SQL Generation
+```text
+User Question
+    ↓
+Guardrails
+    ↓
+Rewrite + Intent
+    ↓
+Schema + Glossary + Few-Shots
+    ↓
+SQL Generation
+    ↓
+SQL Validation
+    ↓
+Cache
+    ↓
+Execution
+    ↓
+Results
+```
 
-✅ Production-Oriented Guardrails
-
-✅ Business-Aware Querying
-
-✅ Automatic Error Recovery
-
-✅ Cost Optimization via Cache
-
-✅ Full Observability with Logfire & Langfuse
-
-✅ Restaurant-Specific Business Rules
-
-✅ Schema-Aware Validation
-
-Source: Architecture and implementation details extracted from the Petpooja NL-to-SQL Query Generator source code. 
+This architecture prioritizes **accuracy**, **security**, **cost control**, **traceability**, and **production readiness** for restaurant sales analytics.
