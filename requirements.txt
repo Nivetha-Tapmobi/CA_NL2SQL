@@ -1,0 +1,10 @@
+streamlit
+pydantic
+pydantic-ai-slim[google,groq]
+pandas
+sqlalchemy
+pymysql
+sqlglot
+python-dotenv
+logfire
+opentelemetry-exporter-otlp-proto-http
